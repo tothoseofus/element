@@ -1,153 +1,115 @@
 name: Build
 
+# This branch is a Windows-only LV2 compatibility experiment for Element 1.2.0.
+# The workflow already exists on the fork's default branch, so it can be
+# started manually from Actions > Build, selecting windows-lv2-test-1.2.0.
 on:
-  push:
-    branches: [ main ]
-    <<: &ci_paths
-      paths-ignore:
-        - 'deps/**'
-      paths:
-        - 'src/**'
-        - 'include/**'
-        - '**/*.cmake'
-        - 'CMakeLists.txt'
-        - '**/CMakeLists.txt'
-        - '.gitmodules'
-        - '.github/workflows/build.yml'
-  pull_request:
-    branches: [ main ]
-    <<: *ci_paths
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
-  build-and-test:
-    strategy:
-      matrix:
-        os: [ubuntu-22.04, macos-latest, windows-2022]
-      fail-fast: false
-    
-    runs-on: ${{ matrix.os }}
-    
+  windows-lv2-test:
+    name: Element 1.2.0 Windows x64 (portable test)
+    runs-on: windows-2022
+    timeout-minutes: 120
+
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      with:
-        submodules: recursive
-    
-    - name: Cache apt packages (Linux)
-      if: runner.os == 'Linux'
-      uses: actions/cache@v4
-      with:
-        path: /var/cache/apt/archives
-        key: ${{ runner.os }}-apt-${{ hashFiles('.github/workflows/build.yml') }}
-        restore-keys: |
-          ${{ runner.os }}-apt-
-    
-    - name: Install dependencies (Linux)
-      if: runner.os == 'Linux'
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          build-essential \
-          cmake \
-          ninja-build \
-          libasound2-dev \
-          libjack-jackd2-dev \
-          ladspa-sdk \
-          libcurl4-openssl-dev \
-          libfontconfig1-dev \
-          libfreetype6-dev \
-          libx11-dev \
-          libxcomposite-dev \
-          libxcursor-dev \
-          libxext-dev \
-          libxinerama-dev \
-          libxrandr-dev \
-          libxrender-dev \
-          libglu1-mesa-dev \
-          mesa-common-dev
-    
-    - name: Setup Boost (Linux)
-      if: runner.os == 'Linux'
-      id: install-boost-linux
-      uses: MarkusJx/install-boost@v2.4.5
-      with:
-        boost_version: 1.83.0
-        platform_version: 22.04
-        toolset: gcc
-    
-    - name: Cache Homebrew (macOS)
-      if: runner.os == 'macOS'
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/Library/Caches/Homebrew
-          /usr/local/Cellar
-        key: ${{ runner.os }}-brew-${{ hashFiles('.github/workflows/build.yml') }}
-        restore-keys: |
-          ${{ runner.os }}-brew-
-    
-    - name: Install dependencies (macOS)
-      if: runner.os == 'macOS'
-      run: |
-        brew install cmake ninja
-    
-    - name: Setup Boost (macOS)
-      if: runner.os == 'macOS'
-      id: install-boost-macos
-      uses: MarkusJx/install-boost@v2.4.5
-      with:
-        boost_version: 1.83.0
-        platform_version: 11
-        toolset: clang
+      - name: Checkout Element 1.2.0 source and submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
-    - name: Install Boost headers (Windows)
-      if: runner.os == 'Windows'
-      shell: pwsh
-      run: |
-        $boost_ver = "1.83.0"
-        $boost_dir = "boost_$($boost_ver -replace '\.','_')"
-        $url = "https://archives.boost.io/release/$boost_ver/source/${boost_dir}.zip"
-        Invoke-WebRequest -Uri $url -OutFile boost.zip
-        New-Item -ItemType Directory -Force -Path C:\local
-        Expand-Archive -Path boost.zip -DestinationPath C:\local
-        echo "BOOST_ROOT=C:\local\$boost_dir" >> $env:GITHUB_ENV
+      - name: Check source version
+        shell: pwsh
+        run: |
+          $version = Select-String -Path CMakeLists.txt -Pattern '^project\(element VERSION 1\.2\.0\)'
+          if (-not $version) {
+            throw "This test workflow must build Element 1.2.0."
+          }
+          git rev-parse --short HEAD
+          git submodule status
 
-    - name: Setup MSVC environment (Windows)
-      if: runner.os == 'Windows'
-      uses: ilammy/msvc-dev-cmd@v1
-      with:
-        arch: amd64
+      - name: Install Boost 1.83.0 headers
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $boostVer = '1.83.0'
+          $boostDir = 'boost_' + ($boostVer -replace '\.', '_')
+          $boostZip = Join-Path $env:RUNNER_TEMP 'boost.zip'
+          Invoke-WebRequest -Uri "https://archives.boost.io/release/$boostVer/source/$boostDir.zip" -OutFile $boostZip
+          New-Item -ItemType Directory -Force -Path 'C:\local' | Out-Null
+          Expand-Archive -Path $boostZip -DestinationPath 'C:\local' -Force
+          "BOOST_ROOT=C:\local\$boostDir" >> $env:GITHUB_ENV
 
-    - name: Setup ccache
-      uses: hendrikmuhs/ccache-action@v1.2
-      with:
-        key: ${{ matrix.os }}-ccache-${{ github.sha }}
-        restore-keys: |
-          ${{ matrix.os }}-ccache-
-    
-    - name: Configure CMake (Windows)
-      if: runner.os == 'Windows'
-      run: |
-        cmake -B build -G Ninja `
-          -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl `
-          -DCMAKE_BUILD_TYPE=Release `
-          -DELEMENT_ENABLE_ASIO=ON `
-          -DELEMENT_ENABLE_UPDATER=ON `
-          -DELEMENT_BUILD_PLUGINS=ON
-    
-    - name: Configure CMake (Unix)
-      if: runner.os != 'Windows'
-      run: |
-        cmake -B build -G Ninja \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DELEMENT_ENABLE_UPDATER=${{ runner.os == 'macOS' && 'ON' || 'OFF' }} \
-        -DELEMENT_BUILD_PLUGINS=ON
-      env:
-        BOOST_ROOT: ${{ steps.install-boost-linux.outputs.BOOST_ROOT || steps.install-boost-macos.outputs.BOOST_ROOT }}
-    
-    - name: Build
-      run: cmake --build build --config Release
-    
-    - name: Run tests
-      run: ctest --test-dir build --output-on-failure
+      - name: Configure MSVC x64
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
+      - name: Configure CMake
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cmake -S . -B build -G Ninja `
+            -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DELEMENT_ENABLE_ASIO=OFF `
+            -DELEMENT_ENABLE_UPDATER=OFF `
+            -DELEMENT_BUILD_PLUGINS=ON `
+            -DELEMENT_BUILD_TESTS=ON
+          if ($LASTEXITCODE -ne 0) { throw "CMake configuration failed" }
+
+      - name: Build Element
+        shell: pwsh
+        run: |
+          cmake --build build --config Release --parallel 4
+          if ($LASTEXITCODE -ne 0) { throw "Element build failed" }
+
+      - name: Run upstream unit tests
+        shell: pwsh
+        run: |
+          ctest --test-dir build --output-on-failure
+          if ($LASTEXITCODE -ne 0) { throw "Element unit tests failed" }
+
+      - name: Assemble portable Windows test package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $stage = Join-Path $env:GITHUB_WORKSPACE 'element-test'
+          cmake --install build --config Release --prefix $stage
+          if ($LASTEXITCODE -ne 0) { throw "Element install failed" }
+
+          $exe = Get-ChildItem -Path $stage -Recurse -File -Filter 'element.exe' |
+            Select-Object -First 1
+          if (-not $exe) { throw "element.exe missing from install tree" }
+
+          # Preserve installed bin/, LV2/, VST3/, CLAP/ and any other runtime
+          # resources. The artifact is a test package, not a signed installer.
+          @'
+          Element 1.2.0 - Windows LV2-host compatibility test
+          --------------------------------------------------
+          This is an unofficial, unsigned test build of Kushview Element.
+          Source: upstream tag 1.2.0.
+          Build: MSVC x64, ASIO OFF, updater OFF, plug-in formats ON.
+
+          Run bin/element.exe from the extracted package.
+          Back up your Element settings before running this experimental build.
+          Do not overwrite your existing Element installation.
+
+          For a clean LV2 diagnostic, first try Element's own LV2 plugin,
+          then GuitarMidi-LV2 and piStomp MIDI Latency Probe.
+          '@ | Set-Content -Encoding UTF8 (Join-Path $stage 'READ_ME_FIRST.txt')
+
+          Write-Host "Application: $($exe.FullName)"
+          Get-ChildItem -Path $stage -Recurse -File |
+            Select-Object FullName, Length
+
+      - name: Upload portable test package
+        uses: actions/upload-artifact@v4
+        with:
+          name: element-1.2.0-windows-x64-lv2-test
+          path: element-test/
+          if-no-files-found: error
+          retention-days: 14
